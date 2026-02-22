@@ -1,7 +1,7 @@
 import streamlit as st
 
 
-st.set_page_config(page_title="Snowday War Game", layout="centered")
+st.set_page_config(page_title="War Game", layout="centered")
 
 
 # --- Session state ---
