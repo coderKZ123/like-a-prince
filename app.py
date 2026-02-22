@@ -1,5 +1,4 @@
 import random
-from collections import deque
 import streamlit as st
 
 st.set_page_config(page_title="War Game", layout="centered")
@@ -22,8 +21,7 @@ if "paths" not in st.session_state:
     # {"Red": set((r,c),...), "Blue": set(...)} squares on path (excluding castles)
     st.session_state.paths = {"Red": set(), "Blue": set()}
 if "troops" not in st.session_state:
-    # list of troops:
-    # {"id": int, "team": "Red"/"Blue", "path": [(r,c),...], "idx": int}
+    # {"id": int, "team": "...", "path": [(r,c),...], "idx": int}
     st.session_state.troops = []
 if "next_id" not in st.session_state:
     st.session_state.next_id = 1
@@ -39,7 +37,8 @@ CARD_TO_STRUCTURE = {
     "Tower":  {"type": "Tower",           "emoji": "🗼"},
 }
 TROOP_EMOJI = "🗡️"
-PATH_EMOJI = "▫️"  # shown on path squares
+PATH_EMOJI = "▫️"
+
 
 # =========================
 # Helpers
@@ -52,10 +51,9 @@ def in_bounds(r, c) -> bool:
     return 0 <= r < size and 0 <= c < size
 
 def neighbors4(r, c):
-    for dr, dc in [(-1,0),(1,0),(0,-1),(0,1)]:  # no diagonal
-        rr, cc = r + dr, c + dc
-        if in_bounds(rr, cc):
-            yield rr, cc
+    # no diagonals
+    nbrs = [(r-1,c),(r+1,c),(r,c-1),(r,c+1)]
+    return [(rr,cc) for rr,cc in nbrs if in_bounds(rr,cc)]
 
 def get_castle_pos(team: str):
     size = st.session_state.size
@@ -80,130 +78,115 @@ def reset():
     st.session_state.next_id = 1
     init_castles()
 
-def is_castle_square(r, c) -> bool:
-    data = st.session_state.placements.get((r,c))
-    return bool(data and data["type"] == "Castle")
-
-def is_blocked_for_path(r, c) -> bool:
-    """
-    Path cannot go through buildings/units, but CAN start on a barracks square.
-    Also cannot go onto castles (goal is the castle square, but we keep path squares excluding castle for display).
-    """
-    if is_castle_square(r, c):
-        return True
-    data = st.session_state.placements.get((r,c))
-    if not data:
-        return False
-    # blocked if any structure; barracks square is handled separately in BFS start
-    return True
-
 def find_positions_by(team: str, type_name: str):
     for (r,c), data in st.session_state.placements.items():
         if data["team"] == team and data["type"] == type_name:
             yield (r,c)
 
-def random_shortest_path(start, goal, blocked_set):
-    """
-    BFS shortest path, but randomize neighbor order so the chosen shortest path is random.
-    Returns list of (r,c) including start and goal, or None if no path.
-    """
-    q = deque([start])
-    parent = {start: None}
-
-    while q:
-        cur = q.popleft()
-        if cur == goal:
-            break
-        nbrs = list(neighbors4(cur[0], cur[1]))
-        random.shuffle(nbrs)
-        for nxt in nbrs:
-            if nxt in parent:
-                continue
-            if nxt in blocked_set:
-                continue
-            parent[nxt] = cur
-            q.append(nxt)
-
-    if goal not in parent:
-        return None
-
-    # reconstruct
-    path = []
-    cur = goal
-    while cur is not None:
-        path.append(cur)
-        cur = parent[cur]
-    path.reverse()
-    return path
-
-def compute_paths_and_spawn_troops():
-    """
-    For each team's Melee Barracks:
-      - compute a random (shortest) no-diagonal path to enemy castle
-      - store path squares for display
-      - create 1 troop that will walk along that path
-    """
-    st.session_state.paths = {"Red": set(), "Blue": set()}
-    st.session_state.troops = []
-
-    # blocked squares: any placed structure except the barracks start squares
-    all_structures = set(st.session_state.placements.keys())
-
-    for team in ["Red", "Blue"]:
-        goal = get_castle_pos(enemy(team))  # opponent castle square
-        for start in find_positions_by(team, "Melee Barracks"):
-            # Build blocked set for BFS:
-            # - block all structures
-            # - BUT allow the start square
-            # - block castles (handled by is_blocked_for_path, but simpler to explicitly manage)
-            blocked = set()
-            for pos in all_structures:
-                if pos == start:
-                    continue
-                # allow stepping onto goal (castle) ONLY as final node in BFS
-                if pos == goal:
-                    continue
-                blocked.add(pos)
-
-            path = random_shortest_path(start, goal, blocked)
-            if not path:
-                continue
-
-            # Save squares (exclude start and goal from path markers, optional)
-            for sq in path[1:-1]:
-                st.session_state.paths[team].add(sq)
-
-            troop = {
-                "id": st.session_state.next_id,
-                "team": team,
-                "path": path,  # includes start..goal
-                "idx": 0,      # troop is currently at path[idx]
-            }
-            st.session_state.next_id += 1
-            st.session_state.troops.append(troop)
-
-def step_troops_one_square():
-    """
-    Each troop moves 1 square along its stored path (no diagonal by construction).
-    """
-    for troop in st.session_state.troops:
-        if troop["idx"] < len(troop["path"]) - 1:
-            troop["idx"] += 1
-
 def troop_positions_map():
-    """
-    Return dict {(r,c): [troop,...]} (can be multiple troops on same square).
-    We'll display just one emoji even if stacked.
-    """
     mp = {}
     for t in st.session_state.troops:
         r, c = t["path"][t["idx"]]
         mp.setdefault((r,c), []).append(t)
     return mp
 
-# Ensure castles exist (first run)
+
+# =========================
+# ANY-PATH generator (not shortest)
+# =========================
+def random_any_path(start, goal, blocked_set, max_steps=400):
+    """
+    Finds ANY path (no diagonal) using randomized DFS (backtracking).
+    - blocked_set squares cannot be stepped on
+    - returns list [start..goal] or None
+    """
+    stack = [(start, [start])]
+    visited = set([start])
+
+    steps = 0
+    while stack and steps < max_steps:
+        steps += 1
+        cur, path = stack[-1]
+
+        if cur == goal:
+            return path
+
+        # Try random neighbors not visited and not blocked
+        nbrs = neighbors4(cur[0], cur[1])
+        random.shuffle(nbrs)
+
+        moved = False
+        for nxt in nbrs:
+            if nxt in blocked_set:
+                continue
+            if nxt in visited:
+                continue
+            visited.add(nxt)
+            stack.append((nxt, path + [nxt]))
+            moved = True
+            break
+
+        if not moved:
+            # dead end -> backtrack
+            stack.pop()
+
+    return None
+
+
+def compute_paths_and_spawn_troops():
+    """
+    For each team's Melee Barracks:
+      - compute ANY (random) no-diagonal path to enemy castle
+      - store path squares for display
+      - create 1 troop that will walk along that path
+    """
+    st.session_state.paths = {"Red": set(), "Blue": set()}
+    st.session_state.troops = []
+
+    all_structures = set(st.session_state.placements.keys())
+
+    for team in ["Red", "Blue"]:
+        goal = get_castle_pos(enemy(team))  # opponent castle square
+
+        for start in find_positions_by(team, "Melee Barracks"):
+            # Block all structures except:
+            # - allow start (barracks square)
+            # - allow goal (castle square) as final square
+            blocked = set()
+            for pos in all_structures:
+                if pos == start:
+                    continue
+                if pos == goal:
+                    continue
+                blocked.add(pos)
+
+            path = random_any_path(start, goal, blocked_set=blocked, max_steps=2000)
+            if not path:
+                continue
+
+            for sq in path[1:-1]:
+                st.session_state.paths[team].add(sq)
+
+            troop = {
+                "id": st.session_state.next_id,
+                "team": team,
+                "path": path,
+                "idx": 0,
+            }
+            st.session_state.next_id += 1
+            st.session_state.troops.append(troop)
+
+
+def step_troops_one_square():
+    for troop in st.session_state.troops:
+        if troop["idx"] < len(troop["path"]) - 1:
+            troop["idx"] += 1
+
+
+# Ensure castles exist
 if len(st.session_state.placements) == 0:
     init_castles()
+
 
 # =========================
 # CSS
@@ -230,8 +213,9 @@ st.markdown(
 # =========================
 # Header
 # =========================
-st.title("War Game (Paths to Castle)")
-st.caption("Build phase: place Melee Barracks. Then press Play: computer draws random (no-diagonal) paths to the enemy castle and shows troops walking.")
+st.title("War Game (Any Path to Castle)")
+st.caption("Build: place Melee Barracks. Play: computer draws ANY (random) no-diagonal path to enemy castle and shows troops walking.")
+
 
 # =========================
 # Sidebar controls
@@ -256,39 +240,36 @@ with st.sidebar:
             step_troops_one_square()
 
     st.divider()
-    st.write("Turn (for placing):")
+    st.write("Placing for:")
     st.subheader(st.session_state.turn)
     if st.session_state.phase == "build":
         if st.button("🔁 Switch Player"):
             st.session_state.turn = enemy(st.session_state.turn)
 
+
 # =========================
-# Board helpers (display)
+# Board display helpers
 # =========================
 def square_label(r, c):
-    """
-    Layering:
-    1) troop (🗡️)
-    2) building (castle/barracks/etc.)
-    3) path marker (▫️)
-    4) empty dot
-    """
+    # 1) troops
     tmap = troop_positions_map()
-    if (r,c) in tmap:
-        team_initial = "R" if tmap[(r,c)][0]["team"] == "Red" else "B"
+    if (r, c) in tmap:
+        team_initial = "R" if tmap[(r, c)][0]["team"] == "Red" else "B"
         return f"{team_initial}{TROOP_EMOJI}"
 
+    # 2) structures
     data = st.session_state.placements.get((r, c))
     if data:
         team_initial = "R" if data["team"] == "Red" else "B"
         return f"{team_initial}{data['emoji']}"
 
+    # 3) path markers (only in play)
     if st.session_state.phase == "play":
-        # show either team's path squares
-        if (r,c) in st.session_state.paths["Red"] or (r,c) in st.session_state.paths["Blue"]:
+        if (r, c) in st.session_state.paths["Red"] or (r, c) in st.session_state.paths["Blue"]:
             return PATH_EMOJI
 
     return "·"
+
 
 def place_structure(card_name: str):
     if st.session_state.phase != "build":
@@ -297,18 +278,18 @@ def place_structure(card_name: str):
         return
     r, c = st.session_state.selected
 
-    # can't overwrite castles or any existing structure
-    existing = st.session_state.placements.get((r,c))
-    if existing:
+    # can't overwrite anything (including castles)
+    if (r, c) in st.session_state.placements:
         st.warning("That square is occupied.")
         return
 
     info = CARD_TO_STRUCTURE[card_name]
-    st.session_state.placements[(r,c)] = {
+    st.session_state.placements[(r, c)] = {
         "team": st.session_state.turn,
         "type": info["type"],
         "emoji": info["emoji"],
     }
+
 
 # =========================
 # Board UI
@@ -331,8 +312,9 @@ for r in range(size):
         if cols[c].button(btn_text, key=f"sq_{r}_{c}", use_container_width=True, disabled=disable_click):
             st.session_state.selected = (r, c)
 
+
 # =========================
-# Cards (only build phase)
+# Cards (build phase)
 # =========================
 if st.session_state.phase == "build" and st.session_state.selected is not None:
     team = st.session_state.turn
@@ -366,8 +348,9 @@ if st.session_state.phase == "build" and st.session_state.selected is not None:
             if st.button(f"Place {name}", key=f"place_{name}", use_container_width=True):
                 place_structure(name)
 
+
 # =========================
-# Debug / info (nice for kids)
+# Info
 # =========================
 st.write("---")
 if st.session_state.phase == "play":
