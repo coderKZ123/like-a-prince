@@ -19,7 +19,7 @@ def reset():
 
 
 # --- Header ---
-st.title("❄️ Snowday War Game (Dummy UI)")
+st.title("War Game (Dummy UI)")
 st.caption("Today we ship first. Rules come later.")
 
 
